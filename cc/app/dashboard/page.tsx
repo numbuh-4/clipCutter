@@ -1,6 +1,7 @@
+/* eslint-disable react/jsx-no-bind */
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   Download,
   ExternalLink,
@@ -11,6 +12,7 @@ import {
   Clock,
 } from "lucide-react";
 import Image from "next/image";
+
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -28,7 +30,41 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-// Define Clip type
+/* ------------------------------------------------------------------ */
+/* Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+const extractYouTubeId = (url?: string): string | null => {
+  if (!url) return null;
+  const match = url.match(
+    /(?:youtu\.be\/|youtube\.com\/(?:shorts\/|embed\/|watch\?(?:.*&)?v=))([A-Za-z0-9_-]{11})/
+  );
+  return match ? match[1] : null;
+};
+
+const timeStringToSeconds = (raw: string): number => {
+  if (!raw) return NaN;
+  const parts = raw
+    .split(":")
+    .map(Number)
+    .filter((n) => !isNaN(n));
+  return parts.reduce((acc, curr) => acc * 60 + curr, 0);
+};
+
+const clipDurationSeconds = (duration?: string): number => {
+  if (!duration) return 0;
+  const range = duration.split(/–|-/);
+  if (range.length === 2) {
+    const [start, end] = range.map(timeStringToSeconds);
+    return Math.max(end - start, 0);
+  }
+  const t = timeStringToSeconds(duration);
+  return isNaN(t) ? 0 : t;
+};
+
+/* ------------------------------------------------------------------ */
+/* Types                                                              */
+/* ------------------------------------------------------------------ */
 interface Clip {
   _id: string;
   title: string;
@@ -43,101 +79,101 @@ interface Clip {
   filename: string;
 }
 
+/* ------------------------------------------------------------------ */
+/* Component                                                          */
+/* ------------------------------------------------------------------ */
 export default function ClipsDashboard() {
   const [clips, setClips] = useState<Clip[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortBy, setSortBy] = useState("newest");
+  const [sortBy, setSortBy] = useState<
+    "newest" | "oldest" | "duration" | "size"
+  >("newest");
 
   useEffect(() => {
-    const fetchClips = async () => {
+    (async () => {
       try {
         const token = localStorage.getItem("token");
-        const response = await fetch("http://localhost:4000/api/clips", {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+        const res = await fetch("http://localhost:4000/api/clips", {
+          headers: { Authorization: `Bearer ${token}` },
         });
-        const data = await response.json();
-        setClips(data.clips || []);
-      } catch (error) {
-        console.error("Failed to fetch clips", error);
+        const data = await res.json();
+        setClips(data.clips ?? []);
+      } catch (err) {
+        console.error("Failed to fetch clips:", err);
       }
-    };
-    fetchClips();
+    })();
   }, []);
 
-  const filteredClips = clips.filter((clip) => {
-    const titleMatch =
-      clip.title?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false;
-    const descMatch =
-      clip.description?.toLowerCase().includes(searchQuery.toLowerCase()) ??
-      false;
-    return titleMatch || descMatch;
-  });
+  const filteredClips = useMemo(() => {
+    const q = searchQuery.toLowerCase();
+    return clips.filter(
+      ({ title = "", description = "" }) =>
+        title.toLowerCase().includes(q) || description.toLowerCase().includes(q)
+    );
+  }, [clips, searchQuery]);
 
-  const sortedClips = [...filteredClips].sort((a, b) => {
-    switch (sortBy) {
-      case "newest":
+  const sortedClips = useMemo(() => {
+    return [...filteredClips].sort((a, b) => {
+      if (sortBy === "newest")
+        return +new Date(b.createdAt) - +new Date(a.createdAt);
+      if (sortBy === "oldest")
+        return +new Date(a.createdAt) - +new Date(b.createdAt);
+      if (sortBy === "duration")
         return (
-          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          clipDurationSeconds(b.duration) - clipDurationSeconds(a.duration)
         );
-      case "oldest":
-        return (
-          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-        );
-      case "duration":
-        return (
-          parseFloat(b.duration.replace(":", ".")) -
-          parseFloat(a.duration.replace(":", "."))
-        );
-      case "size":
-        return parseFloat(b.fileSize) - parseFloat(a.fileSize);
-      default:
-        return 0;
-    }
-  });
+      if (sortBy === "size")
+        return (parseFloat(b.fileSize) || 0) - (parseFloat(a.fileSize) || 0);
+      return 0;
+    });
+  }, [filteredClips, sortBy]);
 
-  const handleDownload = (clip: Clip) => {
-    const link = document.createElement("a");
-    link.href = `http://localhost:4000/downloads/${clip.filename}`;
-    link.download = clip.filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
+  const totalDurationMin = useMemo(() => {
+    const sec = clips.reduce(
+      (acc, c) => acc + clipDurationSeconds(c.duration),
+      0
+    );
+    return Math.floor(sec / 60);
+  }, [clips]);
 
-  const handlePreview = (clip: Clip) => {
-    console.log(`Previewing clip: ${clip.title}`);
-  };
+  const totalSize = useMemo(() => {
+    return clips
+      .reduce((acc, c) => acc + (parseFloat(c.fileSize) || 0), 0)
+      .toFixed(1);
+  }, [clips]);
 
-  const handleOpenSource = (url: string) => {
-    window.open(url, "_blank");
-  };
+  function handleDownload(clip: Clip) {
+    const a = document.createElement("a");
+    a.href = `http://localhost:4000/downloads/${clip.filename}`;
+    a.download = clip.filename;
+    a.click();
+  }
 
   return (
     <div className="min-h-screen bg-background">
       <div className="container mx-auto p-6">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold mb-2">My Clips</h1>
+        <header className="mb-8">
+          <h1 className="mb-2 text-3xl font-bold">My Clips</h1>
           <p className="text-muted-foreground">
             Manage and download your saved video clips
           </p>
-        </div>
+        </header>
 
-        <div className="flex flex-col sm:flex-row gap-4 mb-6">
+        <div className="mb-6 flex flex-col gap-4 sm:flex-row">
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-4 w-4" />
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
+              className="pl-10"
               placeholder="Search clips..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-10"
             />
           </div>
+
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" className="w-full sm:w-auto">
-                <Filter className="h-4 w-4 mr-2" />
+                <Filter className="mr-2 h-4 w-4" />
                 Sort by: {sortBy}
               </Button>
             </DropdownMenuTrigger>
@@ -158,7 +194,7 @@ export default function ClipsDashboard() {
           </DropdownMenu>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
           <Card>
             <CardContent className="p-4">
               <div className="flex items-center gap-2">
@@ -175,16 +211,7 @@ export default function ClipsDashboard() {
               <div className="flex items-center gap-2">
                 <Clock className="h-5 w-5 text-primary" />
                 <div>
-                  <p className="text-2xl font-bold">
-                    {Math.floor(
-                      clips.reduce((acc, clip) => {
-                        if (!clip.duration) return acc;
-                        const [min, sec] = clip.duration.split(":").map(Number);
-                        return acc + min * 60 + sec;
-                      }, 0) / 60
-                    )}
-                    
-                  </p>
+                  <p className="text-2xl font-bold">{totalDurationMin} min</p>
                   <p className="text-sm text-muted-foreground">
                     Total Duration
                   </p>
@@ -197,12 +224,7 @@ export default function ClipsDashboard() {
               <div className="flex items-center gap-2">
                 <Download className="h-5 w-5 text-primary" />
                 <div>
-                  <p className="text-2xl font-bold">
-                    {clips
-                      .reduce((acc, clip) => acc + parseFloat(clip.fileSize), 0)
-                      .toFixed(1)}{" "}
-                    MB
-                  </p>
+                  <p className="text-2xl font-bold">{totalSize} MB</p>
                   <p className="text-sm text-muted-foreground">Total Size</p>
                 </div>
               </div>
@@ -210,78 +232,91 @@ export default function ClipsDashboard() {
           </Card>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {sortedClips.map((clip) => (
-            <Card
-              key={clip._id}
-              className="overflow-hidden hover:shadow-lg transition-shadow"
-            >
-              <div className="relative">
-                <Image
-                  src={clip.thumbnail || "/placeholder.svg"}
-                  alt={clip.title}
-                  width={320}
-                  height={180}
-                  className="w-full h-48 object-cover"
-                />
-                <div className="absolute bottom-2 right-2 bg-black/80 text-white px-2 py-1 rounded text-sm">
-                  {clip.duration}
-                </div>
-                <div className="absolute top-2 left-2">
-                  <Badge variant="secondary">{clip.sourcePlatform}</Badge>
-                </div>
-              </div>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-lg line-clamp-1">
-                  {clip.title}
-                </CardTitle>
-                <CardDescription className="line-clamp-2">
-                  {clip.description}
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="pt-0">
-                <div className="flex items-center gap-4 text-sm text-muted-foreground mb-4">
-                  <div className="flex items-center gap-1">
-                    <Calendar className="h-4 w-4" />
-                    {new Date(clip.createdAt).toLocaleDateString()}
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+          {sortedClips.map((clip) => {
+            const youtubeId = extractYouTubeId(clip.sourceUrl);
+            const thumbnailUrl = clip.thumbnail
+              ? clip.thumbnail
+              : youtubeId
+              ? `https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg`
+              : "/placeholder.svg";
+
+            return (
+              <Card
+                key={clip._id}
+                className="overflow-hidden transition-shadow hover:shadow-lg"
+              >
+                <div className="relative">
+                  <Image
+                    src={thumbnailUrl}
+                    alt={clip.title}
+                    width={320}
+                    height={180}
+                    className="h-48 w-full object-cover"
+                    onError={(e) => {
+                      const target = e.currentTarget;
+                      target.onerror = null;
+                      target.src = "/placeholder.svg";
+                    }}
+                  />
+                  <div className="absolute bottom-2 right-2 rounded bg-black/80 px-2 py-1 text-sm text-white">
+                    {clip.duration}
                   </div>
-                  <div>{clip.fileSize}</div>
+                  <div className="absolute top-2 left-2">
+                    <Badge variant="secondary">{clip.sourcePlatform}</Badge>
+                  </div>
                 </div>
-                <div className="flex gap-2">
-                  <Button
-                    onClick={() => handleDownload(clip)}
-                    className="flex-1"
-                  >
-                    <Download className="h-4 w-4 mr-2" />
-                    Download
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={() => handlePreview(clip)}
-                  >
-                    <Play className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={() => handleOpenSource(clip.sourceUrl)}
-                  >
-                    <ExternalLink className="h-4 w-4" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+
+                <CardHeader className="pb-3">
+                  <CardTitle className="line-clamp-1 text-lg">
+                    {clip.title}
+                  </CardTitle>
+                  <CardDescription className="line-clamp-2">
+                    {clip.description}
+                  </CardDescription>
+                </CardHeader>
+
+                <CardContent className="pt-0">
+                  <div className="mb-4 flex items-center gap-4 text-sm text-muted-foreground">
+                    <div className="flex items-center gap-1">
+                      <Calendar className="h-4 w-4" />
+                      {new Date(clip.createdAt).toLocaleDateString()}
+                    </div>
+                    <div>{clip.fileSize} MB</div>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() => handleDownload(clip)}
+                      className="flex-1"
+                    >
+                      <Download className="mr-2 h-4 w-4" />
+                      Download
+                    </Button>
+                    <Button variant="outline" size="icon">
+                      <Play className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={() => window.open(clip.sourceUrl, "_blank")}
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
 
         {sortedClips.length === 0 && (
-          <div className="text-center py-12">
-            <div className="mx-auto w-24 h-24 bg-muted rounded-full flex items-center justify-center mb-4">
+          <div className="py-12 text-center">
+            <div className="mx-auto mb-4 flex h-24 w-24 items-center justify-center rounded-full bg-muted">
               <Play className="h-12 w-12 text-muted-foreground" />
             </div>
-            <h3 className="text-lg font-semibold mb-2">No clips found</h3>
-            <p className="text-muted-foreground mb-4">
+            <h3 className="mb-2 text-lg font-semibold">No clips found</h3>
+            <p className="mb-4 text-muted-foreground">
               {searchQuery
                 ? "Try adjusting your search terms"
                 : "Start by adding some clips from your favorite videos"}
