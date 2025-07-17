@@ -1,21 +1,16 @@
 "use client";
 
-import { useState, useEffect, ComponentType } from "react";
-import dynamic from "next/dynamic";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { ReactPlayerProps } from "react-player";
 
-/* ─── Dynamically load react‑player only on the client ─── */
-const ReactPlayer = dynamic(
-  () =>
-    import("react-player/lazy").then(
-      (m) => m.default as unknown as ComponentType<ReactPlayerProps>
-    ),
-  { ssr: false }
-);
+declare global {
+  interface Window {
+    YT: any;
+    onYouTubeIframeAPIReady: () => void;
+  }
+}
 
-/* ─── Helper utils ─── */
 const extractId = (url: string): string | null => {
   const match = url.match(
     /(?:youtu\.be\/|youtube\.com\/(?:shorts\/|embed\/|watch\?(?:.*&)?v=))([A-Za-z0-9_-]{11})/
@@ -31,9 +26,7 @@ const hhmmssToSeconds = (s: string) => {
   return h * 3600 + m * 60 + sec;
 };
 
-/* ─── Main component ─── */
 export default function ClipCutter() {
-  /* ── State ── */
   const [link, setLink] = useState("");
   const [videoId, setVideoId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -43,25 +36,58 @@ export default function ClipCutter() {
   const [fullLoading, setFullLoading] = useState(false);
   const [banner, setBanner] = useState<{ type: "ok" | "err"; msg: string }>();
 
-  /* ── Parse YT link ── */
+  const playerRef = useRef<any>(null);
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+
   useEffect(() => {
-    if (!link.trim()) {
-      setVideoId(null);
-      return;
-    }
-    const id = extractId(link);
+    const id = extractId(link.trim());
     setVideoId(id);
-    if (!id) setBanner({ type: "err", msg: "Invalid YouTube link" });
+    if (link && !id) setBanner({ type: "err", msg: "Invalid YouTube link" });
     else setBanner(undefined);
   }, [link]);
 
-  /* ── Helper: show message & reset after 4s ── */
+  useEffect(() => {
+    if (!videoId) return;
+
+    if (!window.YT) {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      const firstScript = document.getElementsByTagName("script")[0];
+      firstScript?.parentNode?.insertBefore(tag, firstScript);
+
+      window.onYouTubeIframeAPIReady = loadPlayer;
+    } else {
+      loadPlayer();
+    }
+
+    function loadPlayer() {
+      if (playerRef.current) playerRef.current.destroy();
+      playerRef.current = new window.YT.Player("yt-player", {
+        videoId,
+        events: {
+          onReady: () => {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+            intervalRef.current = setInterval(() => {
+              if (playerRef.current?.getCurrentTime) {
+                setCurrentTime(Math.floor(playerRef.current.getCurrentTime()));
+              }
+            }, 1000);
+          },
+        },
+      });
+    }
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (playerRef.current) playerRef.current.destroy();
+    };
+  }, [videoId]);
+
   const flash = (type: "ok" | "err", msg: string) => {
     setBanner({ type, msg });
     setTimeout(() => setBanner(undefined), 4000);
   };
 
-  /* ── Trimmed clip download ── */
   const handleTrimDownload = async () => {
     if (!videoId) return flash("err", "Paste a video link");
     if (!startTime || !endTime)
@@ -87,6 +113,7 @@ export default function ClipCutter() {
       const data = await res.json();
       if (!res.ok || !data?.snippetFile)
         throw new Error(data?.error || "Download failed");
+
       const a = document.createElement("a");
       a.href = `http://localhost:4000/downloads/${encodeURIComponent(
         data.snippetFile
@@ -102,7 +129,6 @@ export default function ClipCutter() {
     }
   };
 
-  /* ── Full‑video download ── */
   const handleFullDownload = async () => {
     if (!videoId) return flash("err", "Paste a video link");
     const token = localStorage.getItem("token");
@@ -122,6 +148,7 @@ export default function ClipCutter() {
       const data = await res.json();
       if (!res.ok || !data?.file)
         throw new Error(data?.error || "Download failed");
+
       const a = document.createElement("a");
       a.href = `http://localhost:4000/downloads/${encodeURIComponent(
         data.file
@@ -137,7 +164,6 @@ export default function ClipCutter() {
     }
   };
 
-  /* ── Render ── */
   return (
     <div className="mx-auto mt-10 max-w-4xl space-y-4 p-4">
       <Input
@@ -158,23 +184,12 @@ export default function ClipCutter() {
 
       {videoId && (
         <>
-          {/* Player */}
           <div className="flex w-full justify-center px-4">
             <div className="relative aspect-video w-full max-w-[1920px]">
-              <ReactPlayer
-                url={`https://www.youtube.com/watch?v=${videoId}`}
-                controls
-                width="100%"
-                height="100%"
-                onProgress={({ playedSeconds }) =>
-                  setCurrentTime(playedSeconds)
-                }
-                className="!absolute !left-0 !top-0"
-              />
+              <div id="yt-player" className="w-full h-full" />
             </div>
           </div>
 
-          {/* Markers + Full DL */}
           <div className="mt-4 flex items-center justify-between">
             <div className="flex gap-4">
               <Button onClick={() => setStartTime(toHHMMSS(currentTime))}>
@@ -194,7 +209,6 @@ export default function ClipCutter() {
             </Button>
           </div>
 
-          {/* Clip download */}
           <Button
             className="mt-4"
             disabled={trimLoading}
